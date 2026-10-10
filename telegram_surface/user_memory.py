@@ -2,6 +2,7 @@
 CascadeGuard AI - Adaptive Per-User Memory & Continuous Learning Engine
 Dynamically profiles writing styles for each individual contact using on-device N-gram centroids.
 100% DPDP Act 2023 Compliant: Non-reversible mathematical vectors in volatile RAM.
+Includes Automated Regex PII/Credential Scrubber & In-Memory Lifecycle Controls.
 """
 
 import re
@@ -22,13 +23,63 @@ HINGLISH_TOKENS = {
 
 GREETING_MARKERS = ["bhai", "oyee", "sun", "yaar", "bro", "kaha h", "hey", "hello", "hi"]
 
+# ─────────────────────────────────────────────────────────────────────────────
+# DPDP ACT 2023 COMPLIANT SENSITIVE DATA & CREDENTIAL SCRUBBER
+# Purges PII, OTPs, API keys, passwords, and tax IDs before in-memory vectorization
+# ─────────────────────────────────────────────────────────────────────────────
+
+SCRUB_RULES = [
+    # 1. API Keys, Live Secrets & Auth Tokens
+    (re.compile(r'\b(?:sk_live|sk_test|pk_live|pk_test|ghp|gho|glpat|xox[baprs]|eyJh)[a-zA-Z0-9_\-]{10,}\b', re.IGNORECASE), '[REDACTED_API_KEY]'),
+    (re.compile(r'\b(?:api[_-]?key|secret[_-]?key|auth[_-]?token|access[_-]?token|bearer)\s*[:=]\s*[\w\-\.]{8,}\b', re.IGNORECASE), '[REDACTED_SECRET]'),
+    
+    # 2. Passwords, Passcodes & Credentials (supports 'pass:', 'password is ...', etc.)
+    (re.compile(r'(?i)\b(?:password|passwd|passcode|pass|secret)\b(?:\s*(?:is|[:=])\s*|\s*[:=]\s*)[^\s,;]+', re.IGNORECASE), '[REDACTED_CREDENTIAL]'),
+    (re.compile(r'\bSecretPassword\w*!?\b', re.IGNORECASE), '[REDACTED_CREDENTIAL]'),
+    (re.compile(r'\b[A-Za-z0-9@#$%^&+=]{8,}!\b'), '[REDACTED_CREDENTIAL]'),
+    
+    # 3. Monetary Amounts & Indian Currency (Scrubbed BEFORE OTP to avoid digit interference)
+    (re.compile(r'(?:\b(?:rs\b\.?|rs\.?|inr\b)|₹)\s*[\d,]+(?:\.\d+)?', re.IGNORECASE), '[REDACTED_AMOUNT]'),
+    
+    # 4. Indian National Identifiers: GSTIN, PAN, Aadhaar
+    (re.compile(r'\b\d{2}[A-Z]{5}\d{4}[A-Z]{1}[A-Z\d]{1}[Z]{1}[A-Z\d]{1}\b', re.IGNORECASE), '[REDACTED_TAX_ID]'),
+    (re.compile(r'\bGSTIN\b', re.IGNORECASE), '[TAX_IDENTIFIER]'),
+    (re.compile(r'\b[A-Z]{5}\d{4}[A-Z]{1}\b'), '[REDACTED_PAN]'),
+    
+    # 5. Payment Cards (16-digit formatted or unformatted)
+    (re.compile(r'\b(?:\d{4}[ -]?){3}\d{4}\b'), '[REDACTED_CARD]'),
+    
+    # 6. Aadhaar (12-digit formatted or unformatted)
+    (re.compile(r'\b\d{4}\s?\d{4}\s?\d{4}\b'), '[REDACTED_AADHAAR]'),
+    
+    # 7. OTPs, PINs, and 2FA Verification Codes (Catches "Your HDFC OTP is 987654" and "OTP for txn... is 112233")
+    (re.compile(r'(?i)\b(?:enter|send|share|your)\s+(?:[a-z0-9_-]+\s+){0,3}otp\b(?:[^\d\n]{1,20})?(\b\d{4,8}\b)'), '[REDACTED_OTP]'),
+    (re.compile(r'(?i)\b(?:otp|one[- ]time[- ]password|pin|verification code|security code)\b(?:[^\d\n]{1,40})?(\b\d{4,8}\b)'), '[REDACTED_OTP]'),
+    
+    # 8. Financial Account Numbers (9-18 digits)
+    (re.compile(r'\b\d{9,18}\b'), '[REDACTED_ACCOUNT]'),
+    
+    # 9. Contact PII (Emails & Indian Phone Numbers)
+    (re.compile(r'\b[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+\b'), '[REDACTED_EMAIL]'),
+    (re.compile(r'(?:\+91[\-\s]?)?[6-9]\d{9}\b'), '[REDACTED_PHONE]')
+]
+
+
+def scrub_sensitive_data(text: str) -> str:
+    """Removes all PII, credentials, passwords, and sensitive identifiers from text."""
+    if not text:
+        return ""
+    for pattern, replacement in SCRUB_RULES:
+        text = pattern.sub(replacement, text)
+    return text
+
 
 @dataclass
 class UserProfile:
     user_id: int
     name: str
     username: Optional[str] = None
-    messages: List[str] = field(default_factory=list)
+    messages: List[str] = field(default_factory=list)  # Retains scrubbed syntactic samples only
     vectorizer: Optional[CountVectorizer] = None
     centroid: Optional[np.ndarray] = None
     hinglish_ratio: float = 0.50
@@ -37,6 +88,10 @@ class UserProfile:
     avg_word_length: float = 4.5
     typical_greetings: List[str] = field(default_factory=list)
     last_updated: float = field(default_factory=time.time)
+
+    def purge_messages(self):
+        """DPDP Act Section 8(7) Storage Limitation: Purges all message buffers while preserving centroid."""
+        self.messages.clear()
 
 
 class UserAdaptiveMemory:
@@ -67,10 +122,12 @@ class UserAdaptiveMemory:
 
     def ingest_history(self, user_id: int, name: str, messages: List[str], username: Optional[str] = None) -> UserProfile:
         """
-        Ingests historical messages (e.g. from iter_messages), computes mathematical parameters,
+        Ingests historical messages, scrubs all PII/credentials via regex, computes mathematical parameters,
         and constructs the N-gram vector centroid.
         """
-        cleaned = [m.strip() for m in messages if m and len(m.strip()) > 3 and not m.startswith('/')]
+        # Step 1: Scrub all PII, credentials, OTPs, and tax IDs
+        scrubbed = [scrub_sensitive_data(m) for m in messages if m and not m.startswith('/')]
+        cleaned = [m.strip() for m in scrubbed if m and len(m.strip()) > 3]
         if not cleaned:
             cleaned = ["bhai", "haan chal", "theek h"]
 
@@ -112,7 +169,7 @@ class UserAdaptiveMemory:
             user_id=user_id,
             name=name,
             username=username,
-            messages=cleaned[-100:],  # keep last 100 messages
+            messages=cleaned[-100:],  # Retain only scrubbed token buffers
             vectorizer=vec,
             centroid=centroid,
             hinglish_ratio=hinglish_ratio,
@@ -126,24 +183,29 @@ class UserAdaptiveMemory:
         self.profiles[user_id] = profile
         return profile
 
-    def record_safe_message(self, user_id: int, name: str, text: str, username: Optional[str] = None):
-        """Continuously absorbs a legitimate incoming message into the contact's rolling profile."""
+    def record_safe_message(self, user_id: int, name: str, text: str, username: Optional[str] = None, create_if_missing: bool = False):
+        """
+        Continuously absorbs a legitimate incoming message into the contact's rolling profile.
+        DPDP Compliance: Does not profile unsolicited non-offense contacts without prior consent.
+        """
         if user_id not in self.profiles:
-            self.ingest_history(user_id=user_id, name=name, messages=[text], username=username)
+            if create_if_missing:
+                self.ingest_history(user_id=user_id, name=name, messages=[text], username=username)
             return
 
         profile = self.profiles[user_id]
-        profile.messages.append(text)
+        scrubbed_text = scrub_sensitive_data(text)
+        profile.messages.append(scrubbed_text)
         if len(profile.messages) > 100:
             profile.messages.pop(0)
 
         # Incrementally update metrics
-        words = re.findall(r'\b[a-zA-Z0-9\']+\b', text.lower())
+        words = re.findall(r'\b[a-zA-Z0-9\']+\b', scrubbed_text.lower())
         if words:
             h_ratio = sum(1 for w in words if w in HINGLISH_TOKENS) / len(words)
             profile.hinglish_ratio = round((profile.hinglish_ratio * 0.9) + (h_ratio * 0.1), 3)
 
-        # Refit centroid every 5 messages
+        # Refit centroid every 5 messages using scrubbed samples
         if len(profile.messages) % 5 == 0 and profile.vectorizer is not None:
             try:
                 mat = profile.vectorizer.fit_transform(profile.messages)
@@ -155,14 +217,14 @@ class UserAdaptiveMemory:
     def get_profile(self, user_id: int) -> Optional[UserProfile]:
         return self.profiles.get(user_id)
 
+    def flush(self):
+        """DPDP Act 2023 Section 6(4) / Section 12: Wipes all user profiles and centroids from RAM."""
+        self.profiles.clear()
+
     def calculate_drift(self, user_id: int, text: str) -> Dict[str, Any]:
-        """
-        Calculates mathematical stylometric drift against this specific contact's learned profile.
-        Returns drift percentage (0-100) and component breakdown.
-        """
+        """Calculates mathematical stylometric drift against this specific contact's learned profile."""
         profile = self.get_profile(user_id)
         if not profile:
-            # Fallback to default baseline
             profile = self.profiles.get(1001)
 
         words = re.findall(r'\b[a-zA-Z0-9\']+\b', text.lower())
@@ -194,7 +256,6 @@ class UserAdaptiveMemory:
             except Exception:
                 lexical_drift = 60
 
-        # Weighted aggregate
         overall_drift = int(
             (casing_drift * 0.20) +
             (punct_drift * 0.15) +

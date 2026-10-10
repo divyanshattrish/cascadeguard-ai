@@ -66,3 +66,4 @@ env/
 Thumbs.db
 desktop.ini
 *.log
+.agents/
