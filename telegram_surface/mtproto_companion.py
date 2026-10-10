@@ -268,6 +268,34 @@ class CascadeGuardMTProtoCompanion:
                     print(f"\n⚠️ [SUSPICIOUS MESSAGE] From: {sender_name}: \"{text}\" (Drift: {result.stylometric_drift}%)")
                 else:
                     print(f"[+] [SAFE] Message from {sender_name} absorbed into personal baseline. (Risk: {result.overall_risk_score}%)")
+
+                # Real-time Telemetry Dispatch to Frontend SOC Companion Dashboard
+                try:
+                    from companion_server import dispatch_mtproto_event
+                    asyncio.create_task(dispatch_mtproto_event({
+                        "id": f"evt_{getattr(event, 'id', int(time.time() * 1000))}",
+                        "timestamp": time.time(),
+                        "chat_id": event.chat_id,
+                        "sender_name": sender_name,
+                        "text": text,
+                        "result": {
+                            "threat_level": result.threat_level,
+                            "overall_risk_score": result.overall_risk_score,
+                            "processing_time_ms": result.processing_time_ms,
+                            "stylometric_drift": result.stylometric_drift,
+                            "financial_coercion_score": result.financial_coercion_score,
+                            "urgency_score": result.urgency_score,
+                            "extracted_vpas": result.extracted_vpas,
+                            "is_vpa_blacklisted": result.is_vpa_blacklisted,
+                            "extracted_urls": result.extracted_urls,
+                            "extracted_apks": result.extracted_apks,
+                            "flagged_reasons": result.flagged_reasons,
+                            "friend_quiz": result.friend_quiz,
+                            "interlocked": result.threat_level == "CRITICAL_ATO"
+                        }
+                    }))
+                except Exception:
+                    pass
             except Exception as e:
                 print(f"[-] Error processing incoming message: {e}")
 
@@ -462,7 +490,25 @@ class CascadeGuardMTProtoCompanion:
                     await asyncio.sleep(30)
 
         asyncio.create_task(keepalive_heartbeat())
-        print("[✓] CascadeGuard MTProto Companion is actively listening to all incoming chats (TCP Heartbeat active)!")
+
+        # Launch Companion FastAPI & WebSocket Bridge on http://127.0.0.1:5001 in background
+        async def start_api_server():
+            try:
+                import uvicorn
+                from companion_server import app, core_engine
+                core_engine.memory = self.engine.memory
+                core_engine.url_scanner = self.engine.url_scanner
+                core_engine.qr_scanner = self.engine.qr_scanner
+                config = uvicorn.Config(app=app, host="127.0.0.1", port=5001, log_level="warning")
+                server = uvicorn.Server(config)
+                await server.serve()
+            except Exception as e:
+                print(f"[-] Companion API server notice: {e}")
+
+        asyncio.create_task(start_api_server())
+
+        print("[✓] CascadeGuard MTProto Companion is actively listening to all incoming chats!")
+        print("[✓] Companion Live Dashboard Server active on http://127.0.0.1:5001 (WebSocket ws://127.0.0.1:5001/ws)")
         await self.client.run_until_disconnected()
 
     def run_simulation(self):

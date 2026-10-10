@@ -7,6 +7,9 @@ Includes Automated Regex PII/Credential Scrubber & In-Memory Lifecycle Controls.
 
 import re
 import time
+import hashlib
+import hmac
+import secrets
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 import numpy as np
@@ -82,16 +85,46 @@ class UserProfile:
     messages: List[str] = field(default_factory=list)  # Retains scrubbed syntactic samples only
     vectorizer: Optional[CountVectorizer] = None
     centroid: Optional[np.ndarray] = None
+    anchor_centroid: Optional[np.ndarray] = None  # Immutable long-term anchor baseline
+    anchor_hinglish_ratio: float = 0.50
+    is_poisoning_flagged: bool = False
     hinglish_ratio: float = 0.50
     punctuation_density: float = 0.03
     caps_ratio: float = 0.02
     avg_word_length: float = 4.5
     typical_greetings: List[str] = field(default_factory=list)
+    custom_challenge_question: Optional[str] = None
+    custom_challenge_hash: Optional[str] = None  # Salted SHA-256 hash (0 plaintext in RAM)
+    custom_challenge_salt: Optional[str] = None
+    conversation_context: List[Dict[str, Any]] = field(default_factory=list)  # Last 5 turns
     last_updated: float = field(default_factory=time.time)
 
     def purge_messages(self):
         """DPDP Act Section 8(7) Storage Limitation: Purges all message buffers while preserving centroid."""
         self.messages.clear()
+
+    def set_challenge(self, question: str, answer: str):
+        """Sets a zero-knowledge challenge storing ONLY salted SHA-256 hash."""
+        salt = secrets.token_hex(16)
+        ans_normalized = answer.strip().lower().encode('utf-8')
+        h = hashlib.sha256(salt.encode('utf-8') + ans_normalized).hexdigest()
+        self.custom_challenge_question = question
+        self.custom_challenge_salt = salt
+        self.custom_challenge_hash = h
+
+    def verify_challenge(self, attempt: str) -> bool:
+        """Verifies candidate answer against salted SHA-256 hash in constant time."""
+        if not self.custom_challenge_hash or not self.custom_challenge_salt:
+            return False
+        attempt_normalized = attempt.strip().lower().encode('utf-8')
+        calc = hashlib.sha256(self.custom_challenge_salt.encode('utf-8') + attempt_normalized).hexdigest()
+        return hmac.compare_digest(self.custom_challenge_hash, calc)
+
+    def add_context_turn(self, turn_data: Dict[str, Any]):
+        """Adds a turn to rolling conversation context (max 5 turns)."""
+        self.conversation_context.append(turn_data)
+        if len(self.conversation_context) > 5:
+            self.conversation_context.pop(0)
 
 
 class UserAdaptiveMemory:
@@ -99,7 +132,20 @@ class UserAdaptiveMemory:
 
     def __init__(self):
         self.profiles: Dict[int, UserProfile] = {}
+        self.conversation_context: Dict[int, List[Dict[str, Any]]] = {}
         self._init_default_demo_profiles()
+
+    def get_context(self, user_id: int) -> List[Dict[str, Any]]:
+        """Returns ephemeral rolling turns for multi-turn intent tracking."""
+        return self.conversation_context.get(user_id, [])
+
+    def add_context_turn(self, user_id: int, turn_data: Dict[str, Any]):
+        """Adds a turn to ephemeral rolling context without enrolling stranger into persistent profile."""
+        if user_id not in self.conversation_context:
+            self.conversation_context[user_id] = []
+        self.conversation_context[user_id].append(turn_data)
+        if len(self.conversation_context[user_id]) > 5:
+            self.conversation_context[user_id].pop(0)
 
     def _init_default_demo_profiles(self):
         """Preloads default baseline for demo contact Aman Sharma."""
@@ -165,6 +211,8 @@ class UserAdaptiveMemory:
             vec = None
             centroid = None
 
+        anchor_centroid = np.copy(centroid) if centroid is not None else None
+
         profile = UserProfile(
             user_id=user_id,
             name=name,
@@ -172,6 +220,8 @@ class UserAdaptiveMemory:
             messages=cleaned[-100:],  # Retain only scrubbed token buffers
             vectorizer=vec,
             centroid=centroid,
+            anchor_centroid=anchor_centroid,
+            anchor_hinglish_ratio=hinglish_ratio,
             hinglish_ratio=hinglish_ratio,
             punctuation_density=punct_density,
             caps_ratio=caps_ratio,
@@ -187,6 +237,7 @@ class UserAdaptiveMemory:
         """
         Continuously absorbs a legitimate incoming message into the contact's rolling profile.
         DPDP Compliance: Does not profile unsolicited non-offense contacts without prior consent.
+        Baseline Poisoning Defense: Rejects messages that drastically deviate from the anchor baseline.
         """
         if user_id not in self.profiles:
             if create_if_missing:
@@ -195,6 +246,19 @@ class UserAdaptiveMemory:
 
         profile = self.profiles[user_id]
         scrubbed_text = scrub_sensitive_data(text)
+
+        # Baseline Poisoning Shield: Check similarity against long-term anchor centroid
+        if profile.anchor_centroid is not None and profile.vectorizer is not None:
+            try:
+                msg_vec = profile.vectorizer.transform([scrubbed_text]).toarray()
+                sim = cosine_similarity(msg_vec, profile.anchor_centroid)[0][0]
+                # If message diverges completely from anchor (< 15% similarity), flag and don't poison baseline
+                if sim < 0.15:
+                    profile.is_poisoning_flagged = True
+                    return
+            except Exception:
+                pass
+
         profile.messages.append(scrubbed_text)
         if len(profile.messages) > 100:
             profile.messages.pop(0)
@@ -217,9 +281,16 @@ class UserAdaptiveMemory:
     def get_profile(self, user_id: int) -> Optional[UserProfile]:
         return self.profiles.get(user_id)
 
+    def get_or_create_profile(self, user_id: int, name: str = "Contact") -> UserProfile:
+        """Retrieves existing profile or creates a volatile session profile for multi-turn tracking."""
+        if user_id not in self.profiles:
+            self.profiles[user_id] = UserProfile(user_id=user_id, name=name)
+        return self.profiles[user_id]
+
     def flush(self):
         """DPDP Act 2023 Section 6(4) / Section 12: Wipes all user profiles and centroids from RAM."""
         self.profiles.clear()
+        self.conversation_context.clear()
 
     def calculate_drift(self, user_id: int, text: str) -> Dict[str, Any]:
         """Calculates mathematical stylometric drift against this specific contact's learned profile."""
