@@ -106,133 +106,169 @@ class CascadeGuardMTProtoCompanion:
 
         # Automatically scan top recent private chats and ingest baselines
         print("[*] Automatically building baseline profiles for top recent contacts...")
+        recent_user_dialogs = []
         try:
             dialogs = await self.client.get_dialogs(limit=15)
             for dialog in dialogs:
                 try:
                     if dialog.is_user and not getattr(dialog.entity, 'bot', False) and getattr(dialog.entity, 'id', 0) != 777000:
+                        recent_user_dialogs.append(dialog)
                         await self.ingest_contact_history(dialog.entity, limit=40)
                 except Exception as ex:
                     logger_msg = f"[-] Skipping dialog {dialog.name}: {ex}"
         except Exception as e:
             print(f"[-] Dialog fetch notice: {e}")
 
+        # Catch-up audit on recent messages in case messages arrived during startup/reconnect
+        print("[*] Running catch-up security audit on recent messages...")
+        for dialog in recent_user_dialogs[:5]:
+            try:
+                async for last_msg in self.client.iter_messages(dialog.entity, limit=1):
+                    if not last_msg.out and last_msg.text:
+                        u_res = self.engine.evaluate(last_msg.text, user_id=dialog.entity.id, sender_name=dialog.name)
+                        if u_res.threat_level == "CRITICAL_ATO":
+                            print(f"\n🚨 [CATCH-UP AUDIT: UNINTERCEPTED SCAM FOUND] in chat with {dialog.name}: \"{last_msg.text[:50]}...\"")
+                            reasons_fmt = "\n".join([f"• <i>{r}</i>" for r in u_res.flagged_reasons[:3]])
+                            vpa_warn = f"💳 Flagged VPA: <code>{u_res.extracted_vpas[0]}</code> [LOCKED]\n" if u_res.extracted_vpas else ""
+                            warn = (
+                                f"🛡️ <b>[CASCADEGUARD ATO SECURITY INTERLOCK]</b>\n"
+                                f"🚨 <b>Alert:</b> Linguistic drift of <b>{u_res.stylometric_drift}%</b> and coercive demand detected!\n\n"
+                                f"<b>Forensic Findings:</b>\n{reasons_fmt}\n\n"
+                                f"{vpa_warn}"
+                                f"💰 <i>Direct payment channel & external links locked for security.</i>\n\n"
+                                f"❓ <b>Zero-Knowledge Verification Challenge:</b>\n"
+                                f"<i>{u_res.friend_quiz['question']}</i>\n\n"
+                                f"⚙️ <i>Recipient Controls: Type <b>/approve</b> to unlock • Type <b>/remove</b> to delete message</i>"
+                            )
+                            sent_w = await last_msg.reply(warn, parse_mode="html")
+                            self.active_interlocks[dialog.entity.id] = {
+                                "scam_msg": last_msg,
+                                "warning_msg": sent_w,
+                                "sender_id": dialog.entity.id,
+                                "sender_name": dialog.name
+                            }
+            except Exception as ex:
+                pass
+
         @self.client.on(events.NewMessage(incoming=True))
         async def incoming_message_handler(event):
-            # Only inspect private user messages
-            if not event.is_private:
-                return
+            try:
+                # Only inspect private user messages
+                if not (event.is_private or (event.chat_id and event.chat_id > 0)):
+                    return
 
-            sender = await event.get_sender()
-            sender_id = sender.id
-            sender_name = sender.first_name or "Contact"
-            text = event.text
+                text = event.text
+                if not text:
+                    return
 
-            if not text:
-                return
+                sender = await event.get_sender()
+                sender_id = event.sender_id or event.chat_id
+                sender_name = getattr(sender, 'first_name', None) or "Contact"
 
-            # Perform real-time CascadeGuard audit against this specific user's baseline!
-            result = self.engine.evaluate(text, user_id=sender_id, sender_name=sender_name)
+                # Perform real-time CascadeGuard audit against this specific user's baseline!
+                result = self.engine.evaluate(text, user_id=sender_id, sender_name=sender_name)
 
-            if result.threat_level == "CRITICAL_ATO":
-                print(f"\n🚨 [CRITICAL ATO INTERCEPTED] From: {sender_name}")
-                print(f"   Message: \"{text}\"")
-                print(f"   Stylometric Drift: {result.stylometric_drift}% | Combined Risk: {result.overall_risk_score}%")
-                if result.extracted_vpas:
-                    print(f"   Flagged VPA: {result.extracted_vpas[0]} (Locked)")
-                if result.extracted_urls:
-                    print(f"   Flagged Links: {', '.join(result.extracted_urls)} (Malicious: {result.is_url_malicious}, Unverified: {result.is_url_unverified})")
-
-                # Tailor card based on threat archetype (Link vs Imposter Coercion)
-                if result.extracted_urls and result.financial_coercion_score < 40:
-                    url = result.extracted_urls[0]
-                    print(f"[*] Detonating URL '{url}' in isolated Safe Sandbox probe...")
-                    try:
-                        sandbox_rep = await asyncio.to_thread(self.detonator.detonate, url)
-                        print(f"[✓] Sandbox Detonation Complete: Status {sandbox_rep['status_code']}, Verdict: {sandbox_rep['verdict']} ({sandbox_rep['sandbox_elapsed_ms']}ms)")
-                    except Exception as ex:
-                        print(f"[-] Sandbox execution error: {ex}")
-                        sandbox_rep = {
-                            "verdict": "UNVERIFIED_SUSPICIOUS",
-                            "status_code": 0,
-                            "final_host": "unknown",
-                            "redirect_count": 0,
-                            "title": "Probe Error",
-                            "has_password_inputs": False,
-                            "has_otp_inputs": False,
-                            "has_drive_by_download": False,
-                            "brand_spoof_detected": None,
-                            "forensic_flags": ["Sandbox isolated probe timeout/block"],
-                            "risk_score": 75,
-                            "sandbox_elapsed_ms": 120.0
-                        }
-
-                    if sandbox_rep.get('is_trusted') or sandbox_rep.get('verdict') == "TRUSTED_AUTHORITY":
-                        print(f"[✓] Link '{url}' verified as Trusted Authority ({sandbox_rep.get('final_host')}). Clean pass.")
-                        return
-
-                    is_critical = sandbox_rep.get('has_password_inputs') or sandbox_rep.get('has_drive_by_download') or result.is_url_malicious
-                    verdict_icon = "🚨 <b>MALICIOUS PHISHING DETECTED</b>" if is_critical else "⚠️ <b>UNVERIFIED EXTERNAL DOMAIN</b>"
-                    
-                    findings = []
-                    if sandbox_rep.get('title') and sandbox_rep['title'] != 'Unknown':
-                        findings.append(f"• Title: <i>\"{sandbox_rep['title']}\"</i>")
-                    if sandbox_rep.get('redirect_count', 0) > 0:
-                        findings.append(f"• Redirect: <i>{sandbox_rep['redirect_count']} hops -> Landed on <code>{sandbox_rep['final_host']}</code></i>")
-                    if sandbox_rep.get('has_password_inputs'):
-                        findings.append("• 🔴 <b>Credential Harvester:</b> Password capture fields in DOM")
-                    if sandbox_rep.get('has_otp_inputs'):
-                        findings.append("• 🔴 <b>Sensitive Fields:</b> Banking / OTP inputs detected")
-                    if sandbox_rep.get('has_drive_by_download'):
-                        findings.append("• 🔴 <b>Drive-By Payload:</b> Automatic executable/APK dropper flagged")
-                    if sandbox_rep.get('brand_spoof_detected'):
-                        findings.append(f"• 🔴 <b>Brand Spoofing:</b> Impersonating {sandbox_rep['brand_spoof_detected'].upper()}")
-                    for fl in sandbox_rep.get('forensic_flags', []):
-                        if fl not in "\n".join(findings):
-                            findings.append(f"• <i>{fl}</i>")
-
-                    findings_fmt = "\n".join(findings[:4]) if findings else "• <i>Zero-Trust protocol active: Domain not in verified whitelist.</i>"
-                    total_risk = max(result.overall_risk_score, sandbox_rep.get('risk_score', 75))
-
-                    warning_text = (
-                        f"🧪 <b>[CASCADEGUARD SANDBOX LINK DETONATION]</b>\n"
-                        f"<b>Verdict:</b> {verdict_icon} (Risk: <b>{total_risk}%</b>)\n"
-                        f"<b>Submitted URL:</b> <code>{url}</code>\n"
-                        f"<b>Probe Status:</b> HTTP <code>{sandbox_rep.get('status_code', 200)}</code> | Audit: <b>{sandbox_rep.get('sandbox_elapsed_ms', 0)}ms</b>\n\n"
-                        f"<b>Sandbox Forensic Findings:</b>\n{findings_fmt}\n\n"
-                        f"🔒 <i>Direct browsing interlocked to prevent session hijacking.</i>\n\n"
-                        f"⚙️ <i>Recipient Controls: Type <b>/approve</b> to trust • Type <b>/remove</b> to purge link</i>"
-                    )
-                else:
-                    link_warning = ""
+                if result.threat_level == "CRITICAL_ATO":
+                    print(f"\n🚨 [CRITICAL ATO INTERCEPTED] From: {sender_name}")
+                    print(f"   Message: \"{text}\"")
+                    print(f"   Stylometric Drift: {result.stylometric_drift}% | Combined Risk: {result.overall_risk_score}%")
+                    if result.extracted_vpas:
+                        print(f"   Flagged VPA: {result.extracted_vpas[0]} (Locked)")
                     if result.extracted_urls:
-                        link_warning = f"🔗 <b>Target Link:</b> <code>{result.extracted_urls[0]}</code> (Locked)\n"
+                        print(f"   Flagged Links: {', '.join(result.extracted_urls)} (Malicious: {result.is_url_malicious}, Unverified: {result.is_url_unverified})")
 
-                    reasons_fmt = "\n".join([f"• <i>{r}</i>" for r in result.flagged_reasons[:3]])
+                    # Tailor card based on threat archetype (Link vs Imposter Coercion)
+                    if result.extracted_urls and result.financial_coercion_score < 40:
+                        url = result.extracted_urls[0]
+                        print(f"[*] Detonating URL '{url}' in isolated Safe Sandbox probe...")
+                        try:
+                            sandbox_rep = await asyncio.to_thread(self.detonator.detonate, url)
+                            print(f"[✓] Sandbox Detonation Complete: Status {sandbox_rep['status_code']}, Verdict: {sandbox_rep['verdict']} ({sandbox_rep['sandbox_elapsed_ms']}ms)")
+                        except Exception as ex:
+                            print(f"[-] Sandbox execution error: {ex}")
+                            sandbox_rep = {
+                                "verdict": "UNVERIFIED_SUSPICIOUS",
+                                "status_code": 0,
+                                "final_host": "unknown",
+                                "redirect_count": 0,
+                                "title": "Probe Error",
+                                "has_password_inputs": False,
+                                "has_otp_inputs": False,
+                                "has_drive_by_download": False,
+                                "brand_spoof_detected": None,
+                                "forensic_flags": ["Sandbox isolated probe timeout/block"],
+                                "risk_score": 75,
+                                "sandbox_elapsed_ms": 120.0
+                            }
 
-                    warning_text = (
-                        f"🛡️ <b>[CASCADEGUARD ATO SECURITY INTERLOCK]</b>\n"
-                        f"🚨 <b>Alert:</b> Linguistic drift of <b>{result.stylometric_drift}%</b> and coercive demand detected!\n\n"
-                        f"<b>Forensic Indicators:</b>\n{reasons_fmt}\n\n"
-                        f"{link_warning}"
-                        f"💳 <i>Direct payment channel & external links locked for security.</i>\n\n"
-                        f"❓ <b>Zero-Knowledge Verification Challenge:</b>\n"
-                        f"<i>{result.friend_quiz['question']}</i>\n\n"
-                        f"⚙️ <i>Recipient Controls: Type <b>/approve</b> to unlock • Type <b>/remove</b> to delete message</i>"
-                    )
+                        if sandbox_rep.get('is_trusted') or sandbox_rep.get('verdict') == "TRUSTED_AUTHORITY":
+                            print(f"[✓] Link '{url}' verified as Trusted Authority ({sandbox_rep.get('final_host')}). Clean pass.")
+                            return
 
-                sent_warning = await event.reply(warning_text, parse_mode="html")
-                self.active_interlocks[event.chat_id] = {
-                    "scam_msg": event.message,
-                    "warning_msg": sent_warning,
-                    "sender_id": sender_id,
-                    "sender_name": sender_name
-                }
+                        is_critical = sandbox_rep.get('has_password_inputs') or sandbox_rep.get('has_drive_by_download') or result.is_url_malicious
+                        verdict_icon = "🚨 <b>MALICIOUS PHISHING DETECTED</b>" if is_critical else "⚠️ <b>UNVERIFIED EXTERNAL DOMAIN</b>"
+                        
+                        findings = []
+                        if sandbox_rep.get('title') and sandbox_rep['title'] != 'Unknown':
+                            findings.append(f"• Title: <i>\"{sandbox_rep['title']}\"</i>")
+                        if sandbox_rep.get('redirect_count', 0) > 0:
+                            findings.append(f"• Redirect: <i>{sandbox_rep['redirect_count']} hops -> Landed on <code>{sandbox_rep['final_host']}</code></i>")
+                        if sandbox_rep.get('has_password_inputs'):
+                            findings.append("• 🔴 <b>Credential Harvester:</b> Password capture fields in DOM")
+                        if sandbox_rep.get('has_otp_inputs'):
+                            findings.append("• 🔴 <b>Sensitive Fields:</b> Banking / OTP inputs detected")
+                        if sandbox_rep.get('has_drive_by_download'):
+                            findings.append("• 🔴 <b>Drive-By Payload:</b> Automatic executable/APK dropper flagged")
+                        if sandbox_rep.get('brand_spoof_detected'):
+                            findings.append(f"• 🔴 <b>Brand Spoofing:</b> Impersonating {sandbox_rep['brand_spoof_detected'].upper()}")
+                        for fl in sandbox_rep.get('forensic_flags', []):
+                            if fl not in "\n".join(findings):
+                                findings.append(f"• <i>{fl}</i>")
 
-            elif result.threat_level == "SUSPICIOUS":
-                print(f"\n⚠️ [SUSPICIOUS MESSAGE] From: {sender_name}: \"{text}\" (Drift: {result.stylometric_drift}%)")
-            else:
-                print(f"[+] [SAFE] Message from {sender_name} absorbed into personal baseline. (Risk: {result.overall_risk_score}%)")
+                        findings_fmt = "\n".join(findings[:4]) if findings else "• <i>Zero-Trust protocol active: Domain not in verified whitelist.</i>"
+                        total_risk = max(result.overall_risk_score, sandbox_rep.get('risk_score', 75))
+
+                        warning_text = (
+                            f"🧪 <b>[CASCADEGUARD SANDBOX LINK DETONATION]</b>\n"
+                            f"<b>Verdict:</b> {verdict_icon} (Risk: <b>{total_risk}%</b>)\n"
+                            f"<b>Submitted URL:</b> <code>{url}</code>\n"
+                            f"<b>Probe Status:</b> HTTP <code>{sandbox_rep.get('status_code', 200)}</code> | Audit: <b>{sandbox_rep.get('sandbox_elapsed_ms', 0)}ms</b>\n\n"
+                            f"<b>Sandbox Forensic Findings:</b>\n{findings_fmt}\n\n"
+                            f"🔒 <i>Direct browsing interlocked to prevent session hijacking.</i>\n\n"
+                            f"⚙️ <i>Recipient Controls: Type <b>/approve</b> to trust • Type <b>/remove</b> to purge link</i>"
+                        )
+                    else:
+                        link_warning = ""
+                        if result.extracted_urls:
+                            link_warning = f"🔗 <b>Target Link:</b> <code>{result.extracted_urls[0]}</code> (Locked)\n"
+
+                        reasons_fmt = "\n".join([f"• <i>{r}</i>" for r in result.flagged_reasons[:3]])
+
+                        warning_text = (
+                            f"🛡️ <b>[CASCADEGUARD ATO SECURITY INTERLOCK]</b>\n"
+                            f"🚨 <b>Alert:</b> Linguistic drift of <b>{result.stylometric_drift}%</b> and coercive demand detected!\n\n"
+                            f"<b>Forensic Indicators:</b>\n{reasons_fmt}\n\n"
+                            f"{link_warning}"
+                            f"💳 <i>Direct payment channel & external links locked for security.</i>\n\n"
+                            f"❓ <b>Zero-Knowledge Verification Challenge:</b>\n"
+                            f"<i>{result.friend_quiz['question']}</i>\n\n"
+                            f"⚙️ <i>Recipient Controls: Type <b>/approve</b> to unlock • Type <b>/remove</b> to delete message</i>"
+                        )
+
+                    sent_warning = await event.reply(warning_text, parse_mode="html")
+                    self.active_interlocks[event.chat_id] = {
+                        "scam_msg": event.message,
+                        "warning_msg": sent_warning,
+                        "sender_id": sender_id,
+                        "sender_name": sender_name
+                    }
+
+                elif result.threat_level == "SUSPICIOUS":
+                    print(f"\n⚠️ [SUSPICIOUS MESSAGE] From: {sender_name}: \"{text}\" (Drift: {result.stylometric_drift}%)")
+                else:
+                    print(f"[+] [SAFE] Message from {sender_name} absorbed into personal baseline. (Risk: {result.overall_risk_score}%)")
+            except Exception as e:
+                print(f"[-] Error processing incoming message: {e}")
 
         @self.client.on(events.NewMessage(outgoing=True))
         async def outgoing_command_handler(event):
@@ -323,6 +359,49 @@ class CascadeGuardMTProtoCompanion:
                                 pass
                     await event.respond("✅ <b>[CASCADEGUARD]</b> Security interlock lifted. Contact marked as verified.", parse_mode="html")
 
+            elif cmd in ["/scan", "\\scan", "scan", "/audit", "\\audit", "audit", "/check", "\\check", "check"]:
+                try:
+                    await event.delete()
+                except Exception:
+                    pass
+                target_msg = None
+                if event.is_reply:
+                    target_msg = await event.get_reply_message()
+                else:
+                    async for m in self.client.iter_messages(chat_id, limit=5):
+                        if not m.out and m.text and not m.text.startswith('/'):
+                            target_msg = m
+                            break
+                if target_msg and target_msg.text:
+                    s_sender = await target_msg.get_sender()
+                    s_name = getattr(s_sender, 'first_name', 'Contact') or 'Contact'
+                    s_id = target_msg.sender_id or chat_id
+                    audit_res = self.engine.evaluate(target_msg.text, user_id=s_id, sender_name=s_name)
+                    if audit_res.threat_level == "CRITICAL_ATO":
+                        reasons_fmt = "\n".join([f"• <i>{r}</i>" for r in audit_res.flagged_reasons[:3]])
+                        vpa_warn = f"💳 Flagged VPA: <code>{audit_res.extracted_vpas[0]}</code> [LOCKED]\n" if audit_res.extracted_vpas else ""
+                        warn = (
+                            f"🛡️ <b>[CASCADEGUARD ATO SECURITY INTERLOCK]</b>\n"
+                            f"🚨 <b>On-Demand Audit:</b> Linguistic drift of <b>{audit_res.stylometric_drift}%</b> and coercive demand detected!\n\n"
+                            f"<b>Forensic Findings:</b>\n{reasons_fmt}\n\n"
+                            f"{vpa_warn}"
+                            f"💰 <i>Direct payment channel & external links locked for security.</i>\n\n"
+                            f"❓ <b>Zero-Knowledge Verification Challenge:</b>\n"
+                            f"<i>{audit_res.friend_quiz['question']}</i>\n\n"
+                            f"⚙️ <i>Recipient Controls: Type <b>/approve</b> to unlock • Type <b>/remove</b> to delete message</i>"
+                        )
+                        sent_w = await target_msg.reply(warn, parse_mode="html")
+                        self.active_interlocks[chat_id] = {
+                            "scam_msg": target_msg,
+                            "warning_msg": sent_w,
+                            "sender_id": s_id,
+                            "sender_name": s_name
+                        }
+                    else:
+                        await event.respond(f"✅ <b>[CASCADEGUARD AUDIT]</b> Message verified authentic (Risk: {audit_res.overall_risk_score}%). Clean communication.", parse_mode="html")
+                else:
+                    await event.respond("ℹ️ No incoming message found to audit.", parse_mode="html")
+
             elif cmd in ["/block", "\\block", "block"]:
                 try:
                     await event.delete()
@@ -336,7 +415,18 @@ class CascadeGuardMTProtoCompanion:
                 except Exception as e:
                     await event.respond(f"[-] Block request failed: {e}")
 
-        print("[✓] CascadeGuard MTProto Companion is actively listening to all incoming chats!")
+        # Active Heartbeat task to prevent Windows idle TCP connection drops
+        async def keepalive_heartbeat():
+            while True:
+                try:
+                    await asyncio.sleep(25)
+                    if self.client and self.client.is_connected():
+                        await self.client.get_me()
+                except Exception:
+                    pass
+
+        asyncio.create_task(keepalive_heartbeat())
+        print("[✓] CascadeGuard MTProto Companion is actively listening to all incoming chats (TCP Heartbeat active)!")
         await self.client.run_until_disconnected()
 
     def run_simulation(self):
