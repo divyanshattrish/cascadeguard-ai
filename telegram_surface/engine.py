@@ -22,13 +22,25 @@ BLACKLISTED_VPAS = {
     'festvoting.support@axl'
 }
 
-URGENCY_REGEX = re.compile(
-    r'\b(emergency|hospital|accident|admitted|operation|icu|blood|immediately|urgent|urgently|right now|jaldi|turant|ab ke ab|police|arrest|khatre?|danger|trouble|help|madad|bacha|bachao|save me|fas gy[ae]|risk|serious)\b',
+CRISIS_URGENCY_REGEX = re.compile(
+    r'\b(emergency|hospital|accident|admitted|operation|icu|blood|immediately|urgent|urgently|right now|jaldi|turant|ab ke ab|police|arrest|jail|khatre?|danger|trouble|madad|bacha|bachao|save me|fas gy[ae]|serious)\b|\b(?:help\s+me|please\s+help|urgent\s+help|help\s+urgently|need\s+help)\b',
     re.IGNORECASE
 )
 
-FINANCIAL_REGEX = re.compile(
-    r'(?:(?:₹|rs\.?|inr)?\s*\d{3,}[\d,]*)|(?:\b(?:transfer|send|gpay|phonepe|paytm|upi|bhejde?|bhejo|paise|rupaye|money|cash|fund|bucks|udhaar|required|chahiye|mang rha|pay|payment|borrow)\b)',
+CASUAL_HELP_REGEX = re.compile(r'\b(help)\b', re.IGNORECASE)
+
+FINANCIAL_ACTION_REGEX = re.compile(
+    r'(?:(?:₹|rs\.?|inr)\s*\d+)|(?:\b\d{3,}[\d,]*\s*(?:rs|rupees|inr|transfer|send|bhej))\b|(?:\b(?:transfer|send|gpay|phonepe|paytm|upi|bhejde?|bhejo|udhaar|pay|payment)\b)',
+    re.IGNORECASE
+)
+
+CASUAL_MONEY_REGEX = re.compile(
+    r'\b(paise|rupaye|money|cash|fund|bucks|borrow|required|chahiye|mang rha)\b',
+    re.IGNORECASE
+)
+
+META_DISCUSSION_REGEX = re.compile(
+    r'\b(detecting|detected|particular words|words like|testing|testing if|talking about|discussing|keyword|keywords|algorithm|model)\b',
     re.IGNORECASE
 )
 
@@ -113,17 +125,31 @@ class CascadeGuardCore:
             reasons.append("Adversarial Obfuscation Normalized: Homoglyphs/leetspeak detected and decoded.")
 
         # ── 3. Forensic Intent & VPA Scanner (Agent 2) ──
+        meta_matches = list(set(META_DISCUSSION_REGEX.findall(scan_text)))
+        is_meta_discussion = bool(meta_matches)
+
+        crisis_matches = list(set(CRISIS_URGENCY_REGEX.findall(scan_text)))
+        casual_help_matches = list(set(CASUAL_HELP_REGEX.findall(scan_text))) if not crisis_matches else []
+        urgency_matches = crisis_matches + casual_help_matches
+
+        actionable_fin_matches = list(set(FINANCIAL_ACTION_REGEX.findall(scan_text)))
+        casual_money_matches = list(set(CASUAL_MONEY_REGEX.findall(scan_text))) if not actionable_fin_matches else []
+        financial_matches = actionable_fin_matches + casual_money_matches
+
         urgency_score = 0
-        urgency_matches = list(set(URGENCY_REGEX.findall(scan_text)))
-        if urgency_matches:
-            urgency_score = min(100, len(urgency_matches) * 35)
-            reasons.append(f"Urgency coercion markers detected: {', '.join(urgency_matches)}")
+        if crisis_matches:
+            urgency_score = min(100, len(crisis_matches) * 35)
+            reasons.append(f"Urgency coercion markers detected: {', '.join(crisis_matches)}")
+        elif casual_help_matches and not is_meta_discussion:
+            urgency_score = 10
 
         financial_score = 0
-        financial_matches = list(set(FINANCIAL_REGEX.findall(scan_text)))
-        if financial_matches:
-            financial_score = min(100, len(financial_matches) * 35)
-            reasons.append(f"Financial transfer requests detected: {', '.join(financial_matches)}")
+        if actionable_fin_matches:
+            financial_score = min(100, len(actionable_fin_matches) * 35)
+            reasons.append(f"Financial transfer requests detected: {', '.join(actionable_fin_matches)}")
+        elif casual_money_matches and not is_meta_discussion:
+            financial_score = 10
+            reasons.append(f"Financial mentions: {', '.join(casual_money_matches)}")
 
         affection_matches = list(set(AFFECTION_REGEX.findall(scan_text)))
         if affection_matches and (financial_matches or urgency_matches):
@@ -139,7 +165,7 @@ class CascadeGuardCore:
             if qr_res.get("has_qr"):
                 if qr_res.get("is_upi") and qr_res.get("vpa"):
                     extracted_vpas.append(qr_res["vpa"])
-                    financial_matches.append(f"QR_UPI:{qr_res['vpa']}")
+                    actionable_fin_matches.append(f"QR_UPI:{qr_res['vpa']}")
                     financial_score = max(financial_score, 80)
                     if qr_res.get("is_blacklisted"):
                         is_blacklisted = True
@@ -173,18 +199,21 @@ class CascadeGuardCore:
         past_financial_found = any(turn.get("has_financial") or turn.get("has_vpa") for turn in past_turns)
 
         # Check for multi-turn split attacks (urgency in Turn 1, financial in Turn 2)
-        has_current_coercion = bool(urgency_matches) or bool(financial_matches) or bool(extracted_vpas)
+        is_actionable_urgency = bool(crisis_matches)
+        is_actionable_finance = bool(actionable_fin_matches) or bool(extracted_vpas)
+        has_current_coercion = is_actionable_urgency or is_actionable_finance
         has_compound_coercion = False
 
-        if urgency_matches and (financial_matches or extracted_vpas):
-            has_compound_coercion = True
-        elif has_current_coercion:
-            if urgency_matches and past_financial_found:
+        if not is_meta_discussion:
+            if is_actionable_urgency and is_actionable_finance:
                 has_compound_coercion = True
-                reasons.append("Multi-Turn Lateral Coercion: Split urgency & financial request decoupled across conversation turns!")
-            elif (financial_matches or extracted_vpas) and past_urgency_found:
-                has_compound_coercion = True
-                reasons.append("Multi-Turn Lateral Coercion: Split urgency & financial request decoupled across conversation turns!")
+            elif has_current_coercion:
+                if is_actionable_urgency and past_financial_found:
+                    has_compound_coercion = True
+                    reasons.append("Multi-Turn Lateral Coercion: Split urgency & financial request decoupled across conversation turns!")
+                elif is_actionable_finance and past_urgency_found:
+                    has_compound_coercion = True
+                    reasons.append("Multi-Turn Lateral Coercion: Split urgency & financial request decoupled across conversation turns!")
 
         # ── 6. Master Risk Fusion Arbiter ──
         risk_score = int(
@@ -217,8 +246,8 @@ class CascadeGuardCore:
         self.memory.add_context_turn(user_id, {
             "text": text,
             "timestamp": time.time(),
-            "has_urgency": bool(urgency_matches),
-            "has_financial": bool(financial_matches),
+            "has_urgency": is_actionable_urgency,
+            "has_financial": is_actionable_finance,
             "has_vpa": bool(extracted_vpas)
         })
 
