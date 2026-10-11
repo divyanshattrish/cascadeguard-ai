@@ -5,15 +5,22 @@ Serves on http://127.0.0.1:5001 with real-time WebSocket telemetry broadcasting.
 """
 
 import os
+import sys
 import time
 import asyncio
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
 
+# Ensure UTF-8 stdout encoding on Windows
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from engine import CascadeGuardCore, AnalysisResult
@@ -46,8 +53,55 @@ START_TIME = time.time()
 RECENT_EVENTS: List[Dict[str, Any]] = []
 
 
+def seed_demo_contacts():
+    if not core_engine.memory.profiles:
+        core_engine.memory.ingest_history(
+            user_id=1001,
+            name="Aman Sharma",
+            username="aman_kiet",
+            messages=[
+                "Oyee sun, kal ke lab notes hain tere paas?",
+                "bhai canteen me aa rha h kya?",
+                "haan chal 5 min me nikalte hain hostel se",
+                "bhai prof ne attendance lagayi kya meri?",
+                "mast scene hai bhai sham ko khelne chalenge",
+                "bro assignment submit ho gya portal pe dekh"
+            ]
+        )
+        p1 = core_engine.memory.get_profile(1001)
+        if p1:
+            p1.set_challenge("What was the nickname of our 1st-year hostel warden at KIET?", "Gabbar Sir")
+
+        core_engine.memory.ingest_history(
+            user_id=1002,
+            name="Ayush Srivastav",
+            username="ayush_dev",
+            messages=[
+                "Bhai PR merge kar diya maine github pe",
+                "react components compile ho gaye hain check karlo",
+                "kal hackathon presentation ke slides ready kar lenge",
+                "server endpoints test ho gaye postman me"
+            ]
+        )
+
+        core_engine.memory.ingest_history(
+            user_id=1003,
+            name="Naresh Ji",
+            username="naresh_kiet_admin",
+            messages=[
+                "Divyansh ji lab 3 ke systems verify ho gaye hain",
+                "server backup complete ho gaya hai",
+                "keys drawer admin room me locked hai"
+            ]
+        )
+        p3 = core_engine.memory.get_profile(1003)
+        if p3:
+            p3.set_challenge("Where is the departmental backup keys drawer located?", "Admin Room")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    seed_demo_contacts()
     print("🛡️ [CASCADEGUARD COMPANION SERVER] Initialized on http://127.0.0.1:5001")
     yield
     print("🛑 [CASCADEGUARD COMPANION SERVER] Stopped.")
@@ -257,3 +311,10 @@ async def dispatch_mtproto_event(event_dict: Dict[str, Any]):
         "event": "MESSAGE_AUDITED",
         "data": event_dict
     })
+
+
+if __name__ == "__main__":
+    import uvicorn
+    print("\n🛡️ [CASCADEGUARD COMPANION SERVER] Starting standalone server on http://127.0.0.1:5001 ...")
+    uvicorn.run(app, host="127.0.0.1", port=5001)
+
