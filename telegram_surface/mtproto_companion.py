@@ -103,6 +103,7 @@ class CascadeGuardMTProtoCompanion:
             await self.client.start()
 
         me = await self.client.get_me()
+        self.me = me
         print(f"[✓] Logged in as: {me.first_name} (@{me.username or me.phone})")
 
         # Automatically scan top recent private chats and ingest baselines

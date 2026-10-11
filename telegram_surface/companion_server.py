@@ -157,13 +157,10 @@ async def get_guardian_status():
     acc_user = "divyanshattrish"
     if guardian_companion and getattr(guardian_companion, "client", None) and guardian_companion.client.is_connected():
         is_live = True
-        try:
-            me = await guardian_companion.client.get_me()
-            if me:
-                acc_name = me.first_name
-                acc_user = me.username or acc_user
-        except Exception:
-            pass
+        me = getattr(guardian_companion, "me", None)
+        if me:
+            acc_name = getattr(me, 'first_name', acc_name)
+            acc_user = getattr(me, 'username', acc_user) or acc_user
 
     return {
         "is_active": is_guardian_active and is_live,
@@ -218,7 +215,7 @@ async def start_guardian():
 
     guardian_task = asyncio.create_task(run_listener_bg())
 
-    # Wait up to 3 seconds for connection
+    # Wait up to 3 seconds for initial connection
     for _ in range(30):
         if guardian_companion.client and guardian_companion.client.is_connected():
             break
@@ -226,14 +223,11 @@ async def start_guardian():
 
     me_name = "Divyansh Attrish"
     me_user = "divyanshattrish"
-    if guardian_companion.client and guardian_companion.client.is_connected():
-        try:
-            me = await guardian_companion.client.get_me()
-            if me:
-                me_name = me.first_name
-                me_user = me.username or me_user
-        except Exception:
-            pass
+    if guardian_companion:
+        me = getattr(guardian_companion, "me", None)
+        if me:
+            me_name = getattr(me, 'first_name', me_name)
+            me_user = getattr(me, 'username', me_user) or me_user
 
     await ws_manager.broadcast({
         "event": "STATUS_CHANGE",
