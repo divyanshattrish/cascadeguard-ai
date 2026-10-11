@@ -90,7 +90,7 @@ class CascadeGuardMTProtoCompanion:
         print(f"    • Centroid Vector: Locked in RAM (DPDP Act Compliant)\n")
         return len(profile.messages)
 
-    async def start_live_listener(self):
+    async def start_live_listener(self, run_api_server: bool = True):
         """Starts real-time MTProto event listener on all incoming DMs."""
         if not TELETHON_AVAILABLE or not self.api_id or not self.api_hash:
             print("[-] Cannot start live MTProto listener without TELEGRAM_API_ID and TELEGRAM_API_HASH.")
@@ -492,23 +492,24 @@ class CascadeGuardMTProtoCompanion:
         asyncio.create_task(keepalive_heartbeat())
 
         # Launch Companion FastAPI & WebSocket Bridge on http://127.0.0.1:5001 in background
-        async def start_api_server():
-            try:
-                import uvicorn
-                from companion_server import app, core_engine
-                core_engine.memory = self.engine.memory
-                core_engine.url_scanner = self.engine.url_scanner
-                core_engine.qr_scanner = self.engine.qr_scanner
-                config = uvicorn.Config(app=app, host="127.0.0.1", port=5001, log_level="warning")
-                server = uvicorn.Server(config)
-                await server.serve()
-            except Exception as e:
-                print(f"[-] Companion API server notice: {e}")
+        if run_api_server:
+            async def start_api_server():
+                try:
+                    import uvicorn
+                    from companion_server import app, core_engine
+                    core_engine.memory = self.engine.memory
+                    core_engine.url_scanner = self.engine.url_scanner
+                    core_engine.qr_scanner = self.engine.qr_scanner
+                    config = uvicorn.Config(app=app, host="127.0.0.1", port=5001, log_level="warning")
+                    server = uvicorn.Server(config)
+                    await server.serve()
+                except Exception as e:
+                    print(f"[-] Companion API server notice: {e}")
 
-        asyncio.create_task(start_api_server())
+            asyncio.create_task(start_api_server())
+            print("[✓] Companion Live Dashboard Server active on http://127.0.0.1:5001 (WebSocket ws://127.0.0.1:5001/ws)")
 
         print("[✓] CascadeGuard MTProto Companion is actively listening to all incoming chats!")
-        print("[✓] Companion Live Dashboard Server active on http://127.0.0.1:5001 (WebSocket ws://127.0.0.1:5001/ws)")
         await self.client.run_until_disconnected()
 
     def run_simulation(self):

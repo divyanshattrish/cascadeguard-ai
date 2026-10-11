@@ -144,11 +144,152 @@ class ResolveInterlockRequest(BaseModel):
 
 # ── REST API Endpoints ──
 
+guardian_companion = None
+guardian_task = None
+is_guardian_active = False
+
+
+@app.get("/api/guardian/status")
+async def get_guardian_status():
+    global is_guardian_active, guardian_companion
+    is_live = False
+    acc_name = "Divyansh Attrish"
+    acc_user = "divyanshattrish"
+    if guardian_companion and getattr(guardian_companion, "client", None) and guardian_companion.client.is_connected():
+        is_live = True
+        try:
+            me = await guardian_companion.client.get_me()
+            if me:
+                acc_name = me.first_name
+                acc_user = me.username or acc_user
+        except Exception:
+            pass
+
+    return {
+        "is_active": is_guardian_active and is_live,
+        "status": "connected" if (is_guardian_active and is_live) else "standby",
+        "account_name": acc_name,
+        "username": acc_user
+    }
+
+
+@app.post("/api/guardian/start")
+async def start_guardian():
+    global guardian_companion, guardian_task, is_guardian_active
+    if is_guardian_active and guardian_companion and getattr(guardian_companion, "client", None) and guardian_companion.client.is_connected():
+        return {
+            "status": "already_active",
+            "message": "Live Telegram Guardian is already actively monitoring."
+        }
+
+    from dotenv import load_dotenv
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if os.path.exists(env_path):
+        load_dotenv(env_path)
+
+    api_id = os.getenv("TELEGRAM_API_ID")
+    api_hash = os.getenv("TELEGRAM_API_HASH")
+
+    if not api_id or not api_hash:
+        raise HTTPException(
+            status_code=400,
+            detail="TELEGRAM_API_ID and TELEGRAM_API_HASH not found in telegram_surface/.env"
+        )
+
+    session_path = os.path.join(os.path.dirname(__file__), "cascadeguard_session")
+
+    from mtproto_companion import CascadeGuardMTProtoCompanion
+    guardian_companion = CascadeGuardMTProtoCompanion(
+        api_id=int(api_id),
+        api_hash=api_hash,
+        session_name=session_path
+    )
+    guardian_companion.engine = core_engine
+
+    async def run_listener_bg():
+        global is_guardian_active
+        try:
+            is_guardian_active = True
+            await guardian_companion.start_live_listener(run_api_server=False)
+        except Exception as e:
+            print(f"[-] Guardian listener stopped: {e}")
+        finally:
+            is_guardian_active = False
+
+    guardian_task = asyncio.create_task(run_listener_bg())
+
+    # Wait up to 3 seconds for connection
+    for _ in range(30):
+        if guardian_companion.client and guardian_companion.client.is_connected():
+            break
+        await asyncio.sleep(0.1)
+
+    me_name = "Divyansh Attrish"
+    me_user = "divyanshattrish"
+    if guardian_companion.client and guardian_companion.client.is_connected():
+        try:
+            me = await guardian_companion.client.get_me()
+            if me:
+                me_name = me.first_name
+                me_user = me.username or me_user
+        except Exception:
+            pass
+
+    await ws_manager.broadcast({
+        "event": "STATUS_CHANGE",
+        "data": {
+            "status": "connected",
+            "is_shield_active": True,
+            "account_name": me_name,
+            "username": me_user,
+            "latency_ms": 0.65
+        }
+    })
+
+    return {
+        "status": "success",
+        "message": f"Live Telegram monitoring activated for {me_name} (@{me_user})!",
+        "account_name": me_name,
+        "username": me_user
+    }
+
+
+@app.post("/api/guardian/stop")
+async def stop_guardian():
+    global guardian_companion, guardian_task, is_guardian_active
+    is_guardian_active = False
+    if guardian_companion and getattr(guardian_companion, "client", None):
+        try:
+            await guardian_companion.client.disconnect()
+        except Exception:
+            pass
+    if guardian_task and not guardian_task.done():
+        guardian_task.cancel()
+
+    await ws_manager.broadcast({
+        "event": "STATUS_CHANGE",
+        "data": {
+            "status": "standby",
+            "is_shield_active": False,
+            "account_name": "Divyansh Attrish",
+            "username": "divyanshattrish",
+            "latency_ms": 0.0
+        }
+    })
+
+    return {"status": "success", "message": "Live Telegram monitoring paused."}
+
+
 @app.get("/api/status")
 async def get_status():
     """Returns active guardian status and real-time engine telemetry."""
+    is_live = False
+    if guardian_companion and getattr(guardian_companion, "client", None) and guardian_companion.client.is_connected():
+        is_live = True
+
     return {
-        "status": "connected",
+        "status": "connected" if is_live else "standby",
+        "is_shield_active": is_guardian_active and is_live,
         "service": "CascadeGuard MTProto Companion",
         "account_name": "Divyansh Attrish",
         "username": "divyanshattrish",

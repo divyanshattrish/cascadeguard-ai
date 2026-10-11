@@ -67,6 +67,7 @@ export const LiveCompanionDashboard: React.FC<LiveCompanionDashboardProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [isSimulating, setIsSimulating] = useState(false);
   const [isFlushing, setIsFlushing] = useState(false);
+  const [isTogglingShield, setIsTogglingShield] = useState(false);
   const [toastMessage, setToastMessage] = useState<{ title: string; desc: string; type: 'success' | 'danger' | 'info' } | null>(null);
 
   // ── Challenge Configurator Modal State ──
@@ -217,6 +218,28 @@ export const LiveCompanionDashboard: React.FC<LiveCompanionDashboardProps> = ({
   }, [toastMessage]);
 
   // ── Actions ──
+
+  const handleToggleShield = async () => {
+    setIsTogglingShield(true);
+    try {
+      const nextActive = !status.is_shield_active;
+      const res = await companionSocket.setShieldActive(nextActive);
+      setStatus((prev) => ({ ...prev, is_shield_active: nextActive }));
+      setToastMessage({
+        title: nextActive ? '🛡️ Live Telegram Guardian Active' : '⏸️ Guardian Paused',
+        desc: res?.message || (nextActive ? 'Actively auditing incoming chats in real-time!' : 'Monitoring put on standby.'),
+        type: nextActive ? 'success' : 'info'
+      });
+    } catch (err: any) {
+      setToastMessage({
+        title: '❌ Guardian Error',
+        desc: err?.message || 'Could not connect to Telegram client.',
+        type: 'danger'
+      });
+    } finally {
+      setIsTogglingShield(false);
+    }
+  };
 
   const handleSimulateAttack = async () => {
     setIsSimulating(true);
@@ -551,18 +574,25 @@ export const LiveCompanionDashboard: React.FC<LiveCompanionDashboardProps> = ({
               <span>{isSimulating ? 'Injecting Attack...' : 'Simulate Attack'}</span>
             </button>
 
-            {/* Shield Toggle */}
+            {/* Live Telegram Monitoring Toggle */}
             <button
-              onClick={() => companionSocket.setShieldActive(!status.is_shield_active)}
+              onClick={handleToggleShield}
+              disabled={isTogglingShield}
               className={`flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl border text-xs font-semibold transition-all shadow-sm ${
                 status.is_shield_active
-                  ? (isDarkMode ? 'bg-emerald-950/60 border-emerald-500/50 text-emerald-300' : 'bg-emerald-50 border-emerald-200 text-emerald-800')
-                  : (isDarkMode ? 'bg-amber-950/60 border-amber-500/50 text-amber-300' : 'bg-amber-50 border-amber-200 text-amber-800')
+                  ? (isDarkMode ? 'bg-emerald-950/80 border-emerald-500/60 text-emerald-300 ring-2 ring-emerald-500/30' : 'bg-emerald-50 border-emerald-300 text-emerald-800 ring-2 ring-emerald-400/30')
+                  : (isDarkMode ? 'bg-slate-900 border-slate-700 text-slate-300 hover:border-cyan-500/50' : 'bg-white border-slate-300 text-slate-700 hover:border-blue-400 shadow-sm')
               }`}
-              title="Toggle Autonomous Interlock Shield"
+              title="Click to start or pause real-time on-device Telegram monitoring"
             >
-              <Shield className="w-3.5 h-3.5" />
-              <span>{status.is_shield_active ? 'Shield Active' : 'Shield Paused'}</span>
+              <Shield className={`w-3.5 h-3.5 ${status.is_shield_active ? 'text-emerald-400 animate-pulse' : 'text-slate-400'}`} />
+              <span>
+                {isTogglingShield
+                  ? 'Connecting...'
+                  : status.is_shield_active
+                  ? '🟢 Live Monitoring Active'
+                  : '▶ Start Live Guardian'}
+              </span>
             </button>
           </div>
         </div>

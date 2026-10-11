@@ -752,15 +752,52 @@ class CompanionSocketService {
     return [...this.eventsHistory];
   }
 
-  public setShieldActive(active: boolean): void {
-    this.currentStatus.is_shield_active = active;
-    this.emitEvent({
-      event: 'STATUS_CHANGE',
-      data: {
-        status: this.currentStatus.status,
-        latency_ms: this.currentStatus.avg_latency_ms
+  public async startLiveGuardian(): Promise<{ status: string; message: string }> {
+    const isLive = this.socket && this.socket.readyState === WebSocket.OPEN;
+    if (isLive) {
+      try {
+        const res = await fetch(`${API_URL}/guardian/start`, { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+          this.currentStatus.is_shield_active = true;
+          this.notifyStatusChange('connected');
+        }
+        return data;
+      } catch {
+        // Fallback to local
       }
-    });
+    }
+    this.currentStatus.is_shield_active = true;
+    this.notifyStatusChange(this.currentStatus.status);
+    return { status: 'success', message: 'Shield defense active (Local Mode)' };
+  }
+
+  public async stopLiveGuardian(): Promise<{ status: string; message: string }> {
+    const isLive = this.socket && this.socket.readyState === WebSocket.OPEN;
+    if (isLive) {
+      try {
+        const res = await fetch(`${API_URL}/guardian/stop`, { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+          this.currentStatus.is_shield_active = false;
+          this.notifyStatusChange('connected');
+        }
+        return data;
+      } catch {
+        // Fallback to local
+      }
+    }
+    this.currentStatus.is_shield_active = false;
+    this.notifyStatusChange(this.currentStatus.status);
+    return { status: 'success', message: 'Shield defense paused' };
+  }
+
+  public async setShieldActive(active: boolean): Promise<{ status: string; message: string }> {
+    if (active) {
+      return await this.startLiveGuardian();
+    } else {
+      return await this.stopLiveGuardian();
+    }
   }
 
   public disconnect(): void {
