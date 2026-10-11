@@ -95,50 +95,65 @@ Judges rigorously evaluate privacy compliance. CascadeGuard AI is architected sp
 - **Python** (3.10+) & pip
 - **Git**
 
-### 2. Setup Web Prototype (Interactive HUD)
+### ⚡ Option A: 1-Click Launch (Recommended for Any PC)
+
+**On Windows:**
+Simply double-click `start.bat` or run:
+```cmd
+start.bat
+```
+
+**On macOS / Linux:**
 ```bash
-# Clone the repository
-git clone <repo-url>
+chmod +x start.sh
+./start.sh
+```
+
+*What this does automatically:*
+1. Checks Python 3.10+ and Node.js 18+ environments.
+2. Auto-installs npm and pip requirements.
+3. Offers a 1-time secure Telegram phone login (or runs with built-in mock simulation).
+4. Launches the **Companion Telemetry Bridge** (`http://127.0.0.1:5001`) and **Web SOC Dashboard** (`http://localhost:5173`).
+
+---
+
+### 🛠️ Option B: Step-by-Step Manual Setup
+
+#### 1. Clone & Install Dependencies
+```bash
+git clone https://github.com/divyanshattrish/cascadeguard-ai.git
 cd cascadeguard-ai
 
-# Install frontend dependencies
 npm install
-
-# Start Vite dev server
-npm run dev
-# -> Opens http://localhost:5173 (or :5174)
-```
-
-### 3. Setup Telegram Surface (Live On-Device Protection)
-```bash
-cd telegram_surface
-
-# Install Python requirements
 pip install -r requirements.txt
-
-# Copy environment template
-cp .env.example .env
 ```
-Edit `.env` with your Telegram credentials (never commit `.env`!):
+
+#### 2. Configure Telegram Credentials (Optional for Live Monitoring)
+Copy `.env.example` to `telegram_surface/.env`:
+```bash
+cp .env.example telegram_surface/.env
+```
+Add your free Telegram API credentials (from [my.telegram.org](https://my.telegram.org)):
 ```env
-TELEGRAM_BOT_TOKEN=your_bot_token_here
 TELEGRAM_API_ID=your_api_id_here
 TELEGRAM_API_HASH=your_api_hash_here
 ```
 
-### 4. Run Automated Test Suite (100% Offline Validation)
+#### 3. Run the Services
 ```bash
-python test_suite.py
+# Terminal 1: Launch Web SOC Dashboard
+npm run dev
+
+# Terminal 2: Launch Companion API & WebSocket Bridge
+python telegram_surface/companion_server.py
 ```
-*Validates hospital scams, APK vectors, Hinglish baseline calibration, latency benchmarks (avg 0.42ms), and link detection.*
+*Open `http://localhost:5173` $\rightarrow$ Click **"🛡️ Live Telegram Companion"** $\rightarrow$ Click **"▶ Start Live Guardian"** directly from the UI!*
 
-### 5. Launch Live Telegram Guard
+#### 4. Run Automated Test Suites (Offline Verification)
 ```bash
-# To run the Bot Gateway (for group chats & community muting):
-python bot.py
-
-# To run the Personal MTProto Companion (guards personal DMs "At the Glass"):
-python mtproto_companion.py --live
+python telegram_surface/test_suite.py
+python telegram_surface/test_advanced_hardening.py
+python telegram_surface/test_regulatory_audit_v2.py
 ```
 
 ---
